@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#101827">
+  <meta name="description" content="Private one-to-one offline chat over a shared Wi-Fi network.">
+  <link rel="manifest" href="./manifest.json">
+  <title>Airplane Chat</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1220; --panel:#141f31; --muted:#9aabc2; --line:#2a3950; --accent:#60a5fa; --green:#34d399; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:16px system-ui,-apple-system,Segoe UI,sans-serif; background:var(--bg); color:#eef4ff; }
+    main { width:min(720px,100%); margin:auto; padding:22px 16px 40px; }
+    h1 { font-size:26px; margin:4px 0 6px; }
+    .sub,.hint { color:var(--muted); font-size:14px; line-height:1.5; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px; margin:16px 0; }
+    label { display:block; font-size:14px; color:#c8d5e7; margin:12px 0 6px; }
+    input,textarea { width:100%; border:1px solid var(--line); border-radius:10px; background:#0d1727; color:#fff; padding:12px; font:inherit; }
+    textarea { min-height:105px; resize:vertical; overflow-wrap:anywhere; }
+    button { border:0; border-radius:10px; padding:12px 15px; font:600 15px system-ui; background:var(--accent); color:#071321; cursor:pointer; }
+    button.secondary { background:#293b54; color:#edf5ff; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .actions { display:flex; flex-wrap:wrap; gap:9px; margin-top:12px; }
+    .status { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:14px; }
+    .dot { width:9px; height:9px; border-radius:50%; background:#64748b; }
+    .dot.online { background:var(--green); }
+    #chat { display:none; }
+    #messages { display:flex; flex-direction:column; gap:8px; max-height:45vh; overflow:auto; padding:8px 0; }
+    .msg { max-width:85%; padding:10px 12px; border-radius:13px; background:#26364d; overflow-wrap:anywhere; white-space:pre-wrap; }
+    .msg.mine { align-self:flex-end; background:#164b75; }
+    .msg small { display:block; color:#c1d2e7; font-size:11px; margin-top:5px; }
+    .sendrow { display:flex; gap:8px; }
+    .sendrow input { min-width:0; }
+    .warning { border-left:3px solid #fbbf24; padding:8px 11px; color:#f5d78b; background:#3a2e17; border-radius:6px; font-size:13px; line-height:1.5; }
+    .hidden { display:none !important; }
+    code { color:#b9d8ff; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>✈️ Airplane Chat</h1>
+  <p class="sub">Private 1:1 chat between two nearby phones. No account and no internet during the chat.</p>
+
+  <section class="card">
+    <div class="status"><span id="dot" class="dot"></span><span id="status">Not connected</span></div>
+    <label for="nickname">Your nickname</label>
+    <input id="nickname" maxlength="24" placeholder="e.g. Alex" autocomplete="nickname">
+    <p class="hint">First, either person turns on their phone's Wi-Fi hotspot. The other person joins it. Keep Wi-Fi on; mobile data and internet are not needed.</p>
+  </section>
+
+  <section id="setup">
+    <section class="card">
+      <h2 style="font-size:18px;margin:0 0 8px">Create chat</h2>
+      <p class="hint">Use this on the phone that starts the connection. Generate a code and share it with your friend.</p>
+      <button id="createBtn">Create connection code</button>
+      <div id="offerArea" class="hidden">
+        <label for="offerCode">Your connection code — send this to your friend</label>
+        <textarea id="offerCode" readonly></textarea>
+        <div class="actions"><button id="copyOffer">Copy code</button></div>
+        <label for="answerInput">Paste your friend's reply code here</label>
+        <textarea id="answerInput" placeholder="Paste reply code from your friend"></textarea>
+        <div class="actions"><button id="acceptAnswer">Connect</button></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 style="font-size:18px;margin:0 0 8px">Join chat</h2>
+      <p class="hint">Use this on the other phone. Paste the connection code you received.</p>
+      <label for="joinCode">Friend's connection code</label>
+      <textarea id="joinCode" placeholder="Paste connection code here"></textarea>
+      <div class="actions"><button id="joinBtn">Create reply code</button></div>
+      <div id="answerArea" class="hidden">
+        <label for="answerCode">Your reply code — send it back to the person who created the chat</label>
+        <textarea id="answerCode" readonly></textarea>
+        <div class="actions"><button id="copyAnswer">Copy reply code</button></div>
+      </div>
+    </section>
+    <p class="warning">Pairing uses two code exchanges: offer code → reply code. A single shared PIN cannot connect two browsers without a signaling server. Keep these codes private; they contain temporary connection details.</p>
+  </section>
+
+  <section id="chat" class="card">
+    <h2 style="font-size:18px;margin:0 0 8px">Your conversation</h2>
+    <div id="messages" aria-live="polite"></div>
+    <div class="sendrow">
+      <input id="messageInput" maxlength="4000" placeholder="Write a message…" autocomplete="off">
+      <button id="sendBtn">Send</button>
+    </div>
+    <div class="actions"><button id="disconnectBtn" class="secondary">Disconnect</button></div>
+  </section>
+  <p class="hint">Keep this page open while chatting. If either phone closes or suspends Chrome, the connection may drop. Chat history is stored only in this browser on this phone.</p>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const statusEl = $('status'), dot = $('dot');
+  let pc = null, channel = null, role = null;
+  const historyKey = 'airplane-chat-history-v1';
+
+  function status(text, online=false) {
+    statusEl.textContent = text;
+    dot.classList.toggle('online', online);
+  }
+  function setNickname() {
+    const value = $('nickname').value.trim().slice(0,24);
+    return value || 'Friend';
+  }
+  function encode(obj) {
+    const bytes = new TextEncoder().encode(JSON.stringify(obj));
+    let binary = '';
+    bytes.forEach(b => binary += String.fromCharCode(b));
+    return btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  }
+  function decode(code) {
+    const normalized = code.trim().replace(/-/g,'+').replace(/_/g,'/');
+    if (!normalized || normalized.length > 50000) throw new Error('That code is empty or too large.');
+    const binary = atob(normalized + '='.repeat((4-normalized.length%4)%4));
+    const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+    const obj = JSON.parse(new TextDecoder().decode(bytes));
+    if (!obj || obj.v !== 1 || !obj.sdp || !obj.type) throw new Error('This does not look like a valid Airplane Chat code.');
+    return obj;
+  }
+  function waitForIce(peer, timeoutMs=25000) {
+    if (peer.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('Network details took too long to prepare. Try again on the same hotspot.'));
+      }, timeoutMs);
+      function done() {
+        if (peer.iceGatheringState === 'complete') {
+          cleanup(); resolve();
+        }
+      }
+      function cleanup() {
+        clearTimeout(timer);
+        peer.removeEventListener('icegatheringstatechange', done);
+      }
+      peer.addEventListener('icegatheringstatechange', done);
+      done();
+    });
+  }
+  function newPeer() {
+    closePeer();
+    // Deliberately no STUN or TURN: attempt direct connection on the shared local Wi-Fi.
+    pc = new RTCPeerConnection({ iceServers: [] });
+    pc.onconnectionstatechange = () => {
+      const s = pc ? pc.connectionState : 'closed';
+      if (s === 'connected') showChat();
+      status(s === 'connected' ? 'Connected — chat is ready' :
+             s === 'connecting' ? 'Connecting…' :
+             s === 'failed' ? 'Connection failed. Check both phones are on the same hotspot.' :
+             s === 'disconnected' ? 'Connection interrupted' : 'Waiting for connection', s === 'connected');
+    };
+    pc.oniceconnectionstatechange = () => {
+      if (pc && pc.iceConnectionState === 'failed') status('Could not reach the other phone. Hotspot may block device-to-device traffic.');
+    };
+    return pc;
+  }
+  function closePeer() {
+    if (channel) { try { channel.close(); } catch {} }
+    if (pc) { try { pc.close(); } catch {} }
+    channel = null; pc = null;
+  }
+  function setupChannel(ch) {
+    channel = ch;
+    channel.onopen = () => { status('Connected — chat is ready', true); showChat(); };
+    channel.onclose = () => status('Chat disconnected');
+    channel.onerror = () => status('Chat connection error');
+    channel.onmessage = event => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'chat' && typeof data.text === 'string') addMessage(data.text, data.name || 'Friend', false, data.time || Date.now());
+      } catch {}
+    };
+  }
+  function showChat() {
+    $('chat').style.display = 'block';
+    $('setup').classList.add('hidden');
+    renderHistory();
+  }
+  function saveHistory(items) {
+    try { localStorage.setItem(historyKey, JSON.stringify(items.slice(-300))); } catch {}
+  }
+  function getHistory() {
+    try { return JSON.parse(localStorage.getItem(historyKey) || '[]'); } catch { return []; }
+  }
+  function addMessage(text, name, mine, time) {
+    const items = getHistory();
+    items.push({text, name, mine, time});
+    saveHistory(items);
+    appendMessage({text, name, mine, time});
+  }
+  function appendMessage(m) {
+    const div = document.createElement('div');
+    div.className = 'msg' + (m.mine ? ' mine' : '');
+    const body = document.createElement('span');
+    body.textContent = m.text;
+    const meta = document.createElement('small');
+    meta.textContent = `${m.mine ? 'You' : m.name} · ${new Date(m.time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
+    div.append(body, meta);
+    $('messages').append(div);
+    $('messages').scrollTop = $('messages').scrollHeight;
+  }
+  function renderHistory() {
+    $('messages').replaceChildren();
+    getHistory().forEach(appendMessage);
+  }
+  async function copy(id) {
+    const value = $(id).value;
+    try { await navigator.clipboard.writeText(value); alert('Code copied.'); }
+    catch { $(id).focus(); $(id).select(); alert('Copy is unavailable here. Select and copy the code manually.'); }
+  }
+
+  $('createBtn').onclick = async () => {
+    try {
+      if (!window.RTCPeerConnection) throw new Error('WebRTC is not supported in this browser. Use a recent version of Chrome.');
+      role = 'offerer';
+      status('Preparing connection code…');
+      const peer = newPeer();
+      setupChannel(peer.createDataChannel('chat', {ordered:true}));
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      await waitForIce(peer);
+      $('offerCode').value = encode({v:1,type:'offer',sdp:peer.localDescription.sdp});
+      $('offerArea').classList.remove('hidden');
+      status('Connection code ready. Waiting for reply.');
+    } catch (e) { status(e.message); alert(e.message); }
+  };
+
+  $('joinBtn').onclick = async () => {
+    try {
+      if (!window.RTCPeerConnection) throw new Error('WebRTC is not supported in this browser. Use a recent version of Chrome.');
+      const offer = decode($('joinCode').value);
+      if (offer.type !== 'offer') throw new Error('This is not an invitation code. Ask your friend for their connection code.');
+      role = 'answerer';
+      status('Preparing reply code…');
+      const peer = newPeer();
+      peer.ondatachannel = event => setupChannel(event.channel);
+      await peer.setRemoteDescription({type:'offer',sdp:offer.sdp});
+      const answer = await peer.createAnswer();
+      await peer.setLocalDescription(answer);
+      await waitForIce(peer);
+      $('answerCode').value = encode({v:1,type:'answer',sdp:peer.localDescription.sdp});
+      $('answerArea').classList.remove('hidden');
+      status('Reply code ready. Send it back to your friend.');
+    } catch (e) { status(e.message); alert(e.message); }
+  };
+
+  $('acceptAnswer').onclick = async () => {
+    try {
+      if (!pc || role !== 'offerer') throw new Error('Create a connection code first.');
+      const answer = decode($('answerInput').value);
+      if (answer.type !== 'answer') throw new Error('This is not a reply code.');
+      status('Connecting…');
+      await pc.setRemoteDescription({type:'answer',sdp:answer.sdp});
+    } catch (e) { status(e.message); alert(e.message); }
+  };
+  $('copyOffer').onclick = () => copy('offerCode');
+  $('copyAnswer').onclick = () => copy('answerCode');
+
+  function sendMessage() {
+    const input = $('messageInput'), text = input.value.trim();
+    if (!text || !channel || channel.readyState !== 'open') return;
+    const time = Date.now();
+    try {
+      channel.send(JSON.stringify({type:'chat',text,name:setNickname(),time}));
+      addMessage(text, setNickname(), true, time);
+      input.value = '';
+    } catch { status('Message could not be sent.'); }
+  }
+  $('sendBtn').onclick = sendMessage;
+  $('messageInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
+  $('disconnectBtn').onclick = () => {
+    closePeer();
+    $('chat').style.display = 'none';
+    $('setup').classList.remove('hidden');
+    $('offerArea').classList.add('hidden');
+    $('answerArea').classList.add('hidden');
+    $('offerCode').value = $('answerInput').value = $('joinCode').value = $('answerCode').value = '';
+    status('Disconnected');
+  };
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+  }
+})();
+</script>
+</body>
+</html>

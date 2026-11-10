@@ -1,0 +1,9 @@
+{
+  "name": "Airplane Chat",
+  "short_name": "Airplane Chat",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#101827",
+  "description": "One-to-one offline chat over a shared Wi-Fi network."
+}
